@@ -4,8 +4,8 @@ import type {
   ProviderExecutors,
   ProviderProxyExecutor,
 } from "../../core/types.ts";
-import type { ProviderActionHandlers } from "../provider-runtime.ts";
-import type { ApiKeyProviderContext } from "../provider-runtime.ts";
+import type { ProviderActionHandlers } from "../provider-executors.ts";
+import type { ApiKeyProviderContext } from "../provider-executors.ts";
 
 import { Buffer } from "node:buffer";
 import {
@@ -19,11 +19,13 @@ import {
   requiredRecord,
 } from "../../core/cast.ts";
 import { readBoundedResponseBytes, storeResponseInTransit } from "../../core/request.ts";
+import { defineApiKeyProviderExecutors } from "../provider-executors.ts";
+import { defineProviderProxy } from "../provider-proxy.ts";
 import {
-  defineApiKeyProviderExecutors,
-  defineProviderProxy,
   ProviderRequestError,
   providerUserAgent,
+  providerInputError,
+  providerResponseError,
 } from "../provider-runtime.ts";
 
 const elevenlabsApiOrigin = "https://api.elevenlabs.io";
@@ -662,13 +664,13 @@ async function createElevenlabsError(response: Response, mode: "validate" | "exe
     return new ProviderRequestError(429, message);
   }
   if (mode === "validate" && (response.status === 401 || response.status === 403)) {
-    return new ProviderRequestError(400, message);
+    return providerInputError(message);
   }
   if (mode === "execute" && (response.status === 401 || response.status === 403)) {
     return new ProviderRequestError(401, message);
   }
   if (response.status === 400 || response.status === 404 || response.status === 422) {
-    return new ProviderRequestError(400, message);
+    return providerInputError(message);
   }
 
   return new ProviderRequestError(response.status >= 500 ? 502 : response.status, message);
@@ -1124,7 +1126,7 @@ async function storeElevenlabsFile(
 }
 
 function asObject(value: unknown): Record<string, unknown> {
-  return requiredRecord(value, "elevenlabs object", (message) => new ProviderRequestError(502, message));
+  return requiredRecord(value, "elevenlabs object", providerResponseError);
 }
 
 function pickFirstString(input: Record<string, unknown>, ...keys: string[]) {

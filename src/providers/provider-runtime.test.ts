@@ -1,36 +1,39 @@
 import type { ExecutionContext, ResolvedCredential } from "../core/types.ts";
-import type { ProviderActionHandlers, ProviderActionSources } from "./provider-runtime.ts";
+import type { ProviderActionHandlers, ProviderActionSources } from "./provider-executors.ts";
 
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
-import { isPrivateNetworkAccessAllowed, setPrivateNetworkAccessAllowed } from "../core/request.ts";
+import { withProviderNetworkPolicy } from "../core/provider-network-policy.ts";
+import { isPrivateNetworkAccessAllowed } from "../core/request.ts";
 import {
-  downloadUploadSource,
-  createProviderTimeout,
-  createProviderProxyUrl,
   defineOAuthProviderExecutors,
   defineProviderExecutors,
+  mapProviderActionSources,
+} from "./provider-executors.ts";
+import { downloadUploadSource, uploadProviderUrlToTransitFile } from "./provider-files.ts";
+import {
+  createProviderProxyUrl,
   defineProviderProxy,
+  readProviderProxyErrorMessage,
+  readProviderProxyResponse,
+} from "./provider-proxy.ts";
+import {
+  createProviderTimeout,
   isAbortLikeError,
   isAbortSignalError,
-  mapProviderActionSources,
   providerFetch,
   providerInputError,
   ProviderRequestError,
   providerResponseError,
   readProviderErrorTextBody,
   readProviderJson,
-  readProviderProxyErrorMessage,
-  readProviderProxyResponse,
   requiredInputString,
   requiredResponseRecord,
   runProviderRequest,
   toProviderExecutionError,
-  uploadProviderUrlToTransitFile,
 } from "./provider-runtime.ts";
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  setPrivateNetworkAccessAllowed(false);
 });
 
 describe("ProviderRequestError", () => {
@@ -1342,13 +1345,13 @@ describe("provider egress SSRF guard", () => {
       },
       createContext: (_context, fetcher) => ({ fetcher }),
     });
-    setPrivateNetworkAccessAllowed(true);
+    return withProviderNetworkPolicy({ allowPrivateNetwork: true }, async () => {
+      const result = await executors["test_service.probe"]!({}, executionContext);
 
-    const result = await executors["test_service.probe"]!({}, executionContext);
-
-    expect(result.ok).toBe(false);
-    expect(result.error?.message).toContain("must not target private or reserved IP addresses");
-    expect(calls).toHaveLength(0);
+      expect(result.ok).toBe(false);
+      expect(result.error?.message).toContain("must not target private or reserved IP addresses");
+      expect(calls).toHaveLength(0);
+    });
   });
 
   it("reaches private targets for opted-in executors once the deployment enables the flag", async () => {
@@ -1363,12 +1366,12 @@ describe("provider egress SSRF guard", () => {
       createContext: (_context, fetcher) => ({ fetcher }),
       allowPrivateNetwork: isPrivateNetworkAccessAllowed,
     });
-    setPrivateNetworkAccessAllowed(true);
+    return withProviderNetworkPolicy({ allowPrivateNetwork: true }, async () => {
+      const result = await executors["test_service.probe"]!({}, executionContext);
 
-    const result = await executors["test_service.probe"]!({}, executionContext);
-
-    expect(result.ok).toBe(true);
-    expect(calls.map((call) => call.url)).toEqual(["http://10.0.0.5:8123/api/"]);
+      expect(result.ok).toBe(true);
+      expect(calls.map((call) => call.url)).toEqual(["http://10.0.0.5:8123/api/"]);
+    });
   });
 
   it("keeps the opt-in gated on the deployment flag and never unblocks loopback", async () => {
@@ -1385,12 +1388,13 @@ describe("provider egress SSRF guard", () => {
 
     const calls = stubFetchSequence([]);
     const disabled = await executors["test_service.probe"]!({ url: "http://10.0.0.5:8123/api/" }, executionContext);
-    setPrivateNetworkAccessAllowed(true);
-    const loopback = await executors["test_service.probe"]!({ url: "http://127.0.0.1:8123/api/" }, executionContext);
+    return withProviderNetworkPolicy({ allowPrivateNetwork: true }, async () => {
+      const loopback = await executors["test_service.probe"]!({ url: "http://127.0.0.1:8123/api/" }, executionContext);
 
-    expect(disabled.ok).toBe(false);
-    expect(loopback.ok).toBe(false);
-    expect(calls).toHaveLength(0);
+      expect(disabled.ok).toBe(false);
+      expect(loopback.ok).toBe(false);
+      expect(calls).toHaveLength(0);
+    });
   });
 });
 

@@ -1,18 +1,18 @@
 import type { CredentialValidationResult, ProviderExecutors, TransitFileWriter } from "../../core/types.ts";
-import type { ProviderActionHandlers, ProviderRuntimeHandler } from "../provider-runtime.ts";
-import type { ApiKeyProviderContext } from "../provider-runtime.ts";
+import type { ProviderActionHandlers, ProviderRuntimeHandler } from "../provider-executors.ts";
+import type { ApiKeyProviderContext } from "../provider-executors.ts";
 
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { compactObject, optionalString, requiredString } from "../../core/cast.ts";
+import { defineApiKeyProviderExecutors, mapProviderActionSources } from "../provider-executors.ts";
+import { readTransitFileInput } from "../provider-files.ts";
 import {
-  defineApiKeyProviderExecutors,
-  mapProviderActionSources,
   ProviderRequestError,
   providerUserAgent,
-  readTransitFileInput,
   providerInputError,
   providerResponseError,
+  defaultProviderRequestTimeoutMs,
 } from "../provider-runtime.ts";
 
 const pushoverApiBaseUrl = "https://api.pushover.net";
@@ -20,7 +20,6 @@ export const pushoverVersionedApiBaseUrl: string = `${pushoverApiBaseUrl}/1`;
 const pushoverIconBaseUrl = `${pushoverApiBaseUrl}/icons`;
 const pushoverRealtimeUrl = "wss://client.pushover.net/push";
 const pushoverUserAgent = providerUserAgent;
-const pushoverDefaultTimeoutMs = 30_000;
 const pushoverDefaultRealtimeTimeoutSeconds = 60;
 const pushoverMaxRealtimeTimeoutSeconds = 300;
 const pushoverMaxAttachmentBytes = 5 * 1024 * 1024;
@@ -405,7 +404,7 @@ async function getPushoverAppIconImage(input: PushoverActionInput, fetcher: type
     icon: string;
   };
   const iconUrl = `${pushoverIconBaseUrl}/${encodeURIComponent(parsed.icon)}.png`;
-  const timeout = createTimeoutSignal({ timeoutMs: pushoverDefaultTimeoutMs });
+  const timeout = createTimeoutSignal({ timeoutMs: defaultProviderRequestTimeoutMs });
   try {
     const response = await fetcher(iconUrl, {
       method: "GET",
@@ -1068,7 +1067,7 @@ async function requestPushoverJson(input: {
     url.searchParams.set(key, value);
   }
 
-  const timeout = createTimeoutSignal({ timeoutMs: input.timeoutMs ?? pushoverDefaultTimeoutMs });
+  const timeout = createTimeoutSignal({ timeoutMs: input.timeoutMs ?? defaultProviderRequestTimeoutMs });
   try {
     const response = await input.fetcher(url.toString(), {
       method: input.method ?? "GET",
@@ -1102,7 +1101,7 @@ async function requestPushoverJson(input: {
     if (timeout.didTimeout) {
       throw new ProviderRequestError(
         504,
-        `pushover request timed out after ${(input.timeoutMs ?? pushoverDefaultTimeoutMs) / 1000} seconds`,
+        `pushover request timed out after ${(input.timeoutMs ?? defaultProviderRequestTimeoutMs) / 1000} seconds`,
       );
     }
     throw providerResponseError(error instanceof Error ? error.message : "pushover request failed");

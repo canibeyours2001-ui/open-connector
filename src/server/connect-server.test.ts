@@ -1,4 +1,5 @@
-import type { IConnectionStore, StoredConnection } from "../connection-service.ts";
+import type { CatalogStore } from "../catalog-store.ts";
+import type { IConnectionStore, StoredConnection } from "../connection-store.ts";
 import type { ActionPolicyService } from "../core/action-policy.ts";
 import type { TokenPolicy } from "../core/action-policy.ts";
 import type { ActionSearchIndexProvider } from "../core/action-search.ts";
@@ -275,6 +276,20 @@ describe("ConnectServer", () => {
         expect(rejected.status).toBe(401);
         expect(await rejected.json()).toMatchObject({ success: false, errorCode: "unauthorized" });
       }
+    });
+
+    it("accepts a signed form-urlencoded interaction callback", async () => {
+      const app = createTestServer([slackProvider], { eventVerifyToken: "verify-token" }).createApp();
+      await configure(app);
+      const body = "payload=%7B%22type%22%3A%22block_actions%22%7D";
+      const response = await verifyRequest(app, body, {
+        "content-type": "application/x-www-form-urlencoded; charset=utf-8",
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        success: true,
+        data: { valid: true, appId: "A123", challenge: null },
+      });
     });
 
     it("returns a client error for a signed but malformed payload", async () => {
@@ -1789,20 +1804,72 @@ describe("ConnectServer", () => {
     }
   });
 
-  it("surfaces provider errors returned on the OAuth callback", async () => {
+  it("shows a provider error on the OAuth callback as a page, not JSON", async () => {
     const app = createTestServer([apiKeyProvider], { auth: { adminToken: "local-token" } }).createApp();
 
     const response = await app.request(
       "/oauth/callback?error=invalid_scope&error_description=The+requested+scope+is+invalid.&state=example-state",
     );
+    const html = await response.text();
 
-    expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
-        code: "oauth_provider_error",
-        message: 'OAuth provider returned error "invalid_scope": The requested scope is invalid.',
-      },
+    expect(response.status, html).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    expect(html).toContain("Authorization not completed");
+    expect(html).toContain("<code>invalid_scope</code>");
+    // No result origin is configured, so the page posts nothing to its opener.
+    expect(html).not.toContain("postMessage");
+  });
+
+  it("posts a cancelled authorization to the configured opener origin only, and never completes it later", async () => {
+    const app = createTestServer([oauthProvider], {
+      oauthResultOrigins: ["https://console.example.com"],
+      oauthCloseDelaySeconds: 2,
+    }).createApp();
+    const config = await app.request("/api/oauth/configs/oauth_example", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        clientId: "client-id",
+        clientSecret: "client-secret",
+        secretExtra: { appBearerToken: "app-token" },
+      }),
     });
+    expect(config.status).toBe(200);
+    const authorization = await app.request("/api/oauth/authorizations", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ service: "oauth_example" }),
+    });
+    const { state } = (await authorization.json()) as { state: string };
+
+    const callback = await app.request(`/oauth/callback?error=access_denied&state=${state}`);
+    const html = await callback.text();
+
+    expect(callback.status, html).toBe(200);
+    expect(callback.headers.get("content-type")).toContain("text/html");
+    expect(html).toContain("Authorization cancelled");
+    const result = JSON.stringify({ type: "oauth.refused", status: "cancelled", code: "access_denied", state });
+    expect(html).toContain(`const result=${result}`);
+    expect(html).toContain('for(const origin of ["https://console.example.com"])');
+    expect(html).toContain("window.opener.postMessage(result,origin)");
+    expect(html).not.toMatch(/postMessage\([^)]*"\*"/);
+    // The refusal page honours the configured close delay like the completion page.
+    expect(html).toContain("let remaining=2;");
+
+    // A duplicate refusal for a state no longer pending (here: already
+    // refused; equally, already completed by another callback) still gets the
+    // page, but claims nothing about that authorization to the opener.
+    const duplicate = await app.request(`/oauth/callback?error=access_denied&state=${state}`);
+    const duplicateHtml = await duplicate.text();
+    expect(duplicate.status, duplicateHtml).toBe(200);
+    expect(duplicateHtml).toContain("Authorization cancelled");
+    expect(duplicateHtml).not.toContain("postMessage");
+    expect(duplicateHtml).not.toContain(state);
+
+    // A refused authorization can never be completed afterwards.
+    const late = await app.request(`/oauth/callback?state=${state}&code=example-code`);
+    expect(late.status).toBe(400);
+    await expect(late.json()).resolves.toMatchObject({ error: { code: "invalid_oauth_state" } });
   });
 
   it("accepts the shared OAuth callback route without a service path segment", async () => {
@@ -4172,6 +4239,25 @@ describe("ConnectServer", () => {
   });
 });
 
+it.each(["missing", "unreadable"])("handles %s definitions in runtime catalog responses", async (state) => {
+  const catalog = createCatalogStore([catalogOnlyProvider]);
+  vi.spyOn(catalog, "getAction").mockImplementation(async () => {
+    if (state === "unreadable") throw new Error("private catalog file path");
+    return undefined;
+  });
+  const app = createTestServer([catalogOnlyProvider], { catalog }).createApp();
+  for (const path of [
+    `/v1/actions?service=${catalogOnlyProvider.service}`,
+    `/v1/actions/${catalogOnlyProvider.actions[0]!.id}`,
+  ]) {
+    const response = await app.request(path);
+    expect(response.status).toBe(state === "missing" ? 404 : 500);
+    const body = await response.json();
+    expect(body.errorCode).toBe(state === "missing" ? "unknown_action" : "internal_error");
+    expect(JSON.stringify(body)).not.toContain("private catalog file path");
+  }
+});
+
 interface TestAuthOptions {
   adminToken?: string;
   runtimeToken?: string;
@@ -4179,6 +4265,7 @@ interface TestAuthOptions {
 }
 
 interface CreateTestServerOptions {
+  catalog?: CatalogStore;
   marketplace?: MarketplaceService;
   auth?: TestAuthOptions;
   publicOrigin?: string;
@@ -4196,15 +4283,18 @@ interface CreateTestServerOptions {
   secretCodec?: ISecretCodec;
   allowedCustomOAuth?: string[];
   oauthCloseDelaySeconds?: number;
+  oauthResultOrigins?: string[];
   eventVerifyToken?: string;
 }
 
 function createTestServer(providers: ProviderDefinition[], options: CreateTestServerOptions = {}): ConnectServer {
   const requestDatabase = new SqliteRuntimeDatabase(":memory:");
   requestDatabases.push(requestDatabase);
-  const catalog = createCatalogStore(providers, {
-    executableActionIds: ["example.echo"],
-  });
+  const catalog =
+    options.catalog ??
+    createCatalogStore(providers, {
+      executableActionIds: ["example.echo"],
+    });
   const providerLoader: IProviderLoader = options.providerLoader ?? new EmptyProviderLoader();
   const idempotency = options.idempotency ?? new MemoryIdempotencyStore();
   const runtimeTokens = options.runtimeTokens ?? new RuntimeTokenService(new MemoryRuntimeTokenStore());
@@ -4276,6 +4366,7 @@ function createTestServer(providers: ProviderDefinition[], options: CreateTestSe
     actionSearch: options.actionSearch,
     logger: options.logger,
     oauthCloseDelaySeconds: options.oauthCloseDelaySeconds,
+    oauthResultOrigins: options.oauthResultOrigins,
     eventVerifyToken: options.eventVerifyToken,
   });
 }

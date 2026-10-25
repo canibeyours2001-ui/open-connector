@@ -8,7 +8,7 @@ import type {
 import type { IntegrationDefinition } from "../../triggers/common/integration.ts";
 import type { PollDefinition } from "../../triggers/common/poll.ts";
 import type { FeishuActionRuntimeContext } from "../feishu/shared/client.ts";
-import type { ProviderActionHandlerSubset } from "../provider-runtime.ts";
+import type { ProviderActionHandlerSubset } from "../provider-executors.ts";
 
 import { Buffer } from "node:buffer";
 import { compactObject, optionalBoolean, optionalRecord, optionalString } from "../../core/cast.ts";
@@ -37,27 +37,27 @@ import { createFeishuTaskActionHandlers } from "../feishu/shared/task-runtime.ts
 import { createFeishuVcActionHandlers } from "../feishu/shared/vc-runtime.ts";
 import { createFeishuWhiteboardActionHandlers } from "../feishu/shared/whiteboard-runtime.ts";
 import { createFeishuWikiActionHandlers } from "../feishu/shared/wiki-runtime.ts";
+import { requireCustomCredential } from "../provider-credentials.ts";
+import { defineProviderExecutors, getProviderActionHandler, mapProviderActionHandlers } from "../provider-executors.ts";
 import {
   createProviderProxyUrl,
-  defineProviderExecutors,
-  getProviderActionHandler,
-  mapProviderActionHandlers,
   normalizeProviderProxyHeaders,
+  readProviderProxyErrorMessage,
+  readProviderProxyResponse,
+  toProviderProxyError,
+} from "../provider-proxy.ts";
+import {
   providerFetch,
   ProviderRequestError,
   providerUserAgent,
-  readProviderProxyErrorMessage,
-  readProviderProxyResponse,
-  requireCustomCredential,
   requiredInputString,
-  toProviderProxyError,
+  defaultProviderRequestTimeoutMs,
 } from "../provider-runtime.ts";
 import { feishuAppBotActions, feishuAppBotProviderScopes } from "./actions.ts";
 import { feishuEvents } from "./trigger-on-event.ts";
 
 const service = "feishu_app_bot";
 const feishuOpenBaseUrl = "https://open.feishu.cn/open-apis";
-const feishuRequestTimeoutMs = 30_000;
 const feishuTenantAccessTokenRefreshSkewMs = 60_000;
 const feishuMaxImageUploadSourceBytes = 10 * 1024 * 1024;
 const feishuMaxFileUploadSourceBytes = 30 * 1024 * 1024;
@@ -1401,7 +1401,7 @@ function normalizeMimeType(value: string | null | undefined): string | undefined
 
 function createFeishuRequestSignal(parent?: AbortSignal): FeishuRequestSignal {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), feishuRequestTimeoutMs);
+  const timeout = setTimeout(() => controller.abort(), defaultProviderRequestTimeoutMs);
   const abortFromParent = (): void => controller.abort(parent?.reason);
   if (parent?.aborted) {
     controller.abort(parent.reason);

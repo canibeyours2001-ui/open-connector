@@ -1,6 +1,7 @@
 import type { CredentialValidators, ProviderExecutors, ProviderProxyExecutor } from "../../core/types.ts";
-import type { ProviderActionHandlers } from "../provider-runtime.ts";
-import type { ApiKeyProviderContext, ProviderTransitFile } from "../provider-runtime.ts";
+import type { ProviderActionHandlers } from "../provider-executors.ts";
+import type { ApiKeyProviderContext } from "../provider-executors.ts";
+import type { ProviderTransitFile } from "../provider-files.ts";
 
 import {
   compactObject,
@@ -12,10 +13,10 @@ import {
   requiredString,
 } from "../../core/cast.ts";
 import { storeResponseInTransit } from "../../core/request.ts";
+import { defineApiKeyProviderExecutors } from "../provider-executors.ts";
+import { defineProviderProxy } from "../provider-proxy.ts";
 import {
   createProviderFetch,
-  defineApiKeyProviderExecutors,
-  defineProviderProxy,
   providerInputError,
   providerResponseError,
   providerUserAgent,
@@ -203,7 +204,7 @@ async function createLatchshotError(response: Response, phase: LatchshotRequestP
   const message = extractLatchshotErrorMessage(text) ?? `Latchshot request failed with HTTP ${response.status}.`;
 
   if (phase === "validate" && (response.status === 401 || response.status === 403)) {
-    return new ProviderRequestError(400, message);
+    return providerInputError(message);
   }
   if ([400, 401, 403, 413, 429].includes(response.status)) {
     return new ProviderRequestError(response.status, message);
@@ -309,7 +310,7 @@ function requireObject(value: unknown, message: string): Record<string, unknown>
   if (record) {
     return record;
   }
-  throw new ProviderRequestError(502, message);
+  throw providerResponseError(message);
 }
 
 function requireNonNegativeInteger(value: unknown, fieldName: string, positive = false): number {

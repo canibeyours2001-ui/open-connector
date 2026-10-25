@@ -8,7 +8,8 @@ import type { RuntimeActionHttpResult } from "./runtime-api.ts";
 import type { Context } from "hono";
 
 import { Hono } from "hono";
-import { ConnectionError, defaultConnectionName } from "../../connection-service.ts";
+import { ConnectionError } from "../../connection-error.ts";
+import { defaultConnectionName } from "../../connection-service.ts";
 import { optionalString } from "../../core/cast.ts";
 import {
   ActionInputDepthError,
@@ -21,6 +22,7 @@ import { readRuntimeGrant } from "./auth.ts";
 import { HttpRequestError, readConnectionName, readJsonBody } from "./http-utils.ts";
 import {
   mapConnectionErrorStatus,
+  serializeProxyFailure,
   serializeRuntimeActionResult,
   serializeRuntimeFailure,
   unknownActionFailure,
@@ -75,7 +77,7 @@ export function createRuntimeExecutionRoutes({
         actionId,
         executionId: run.executionId,
         remoteExecutionId: run.remoteExecutionId,
-        failureStatus: run.failureStatus,
+        failureKind: run.failureKind,
         retryAfter: run.retryAfter,
         auditPersisted: run.auditPersisted,
         result: run.result,
@@ -271,13 +273,7 @@ export function createRuntimeExecutionRoutes({
       return writeRuntimeSuccess(context, result.response, result.meta);
     }
 
-    return writeRuntimeFailure(context, {
-      status: result.status,
-      errorCode: result.errorCode,
-      message: result.message,
-      data: result.data,
-      meta: result.meta,
-    });
+    return writeRuntimeFailure(context, serializeProxyFailure(result));
   });
 
   return app;

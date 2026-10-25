@@ -5,7 +5,7 @@ import type {
   ProviderProxyExecutor,
 } from "../../core/types.ts";
 import type { IntegrationDefinition } from "../../triggers/common/integration.ts";
-import type { ProviderActionHandlers } from "../provider-runtime.ts";
+import type { ProviderActionHandlers } from "../provider-executors.ts";
 
 import {
   compactObject,
@@ -16,12 +16,13 @@ import {
   optionalStringArray,
 } from "../../core/cast.ts";
 import { assertPublicHttpUrl, isPrivateNetworkAccessAllowed } from "../../core/request.ts";
+import { defineProviderExecutors } from "../provider-executors.ts";
+import { defineProviderProxy } from "../provider-proxy.ts";
 import {
   createProviderFetch,
   ProviderRequestError,
-  defineProviderExecutors,
-  defineProviderProxy,
   providerUserAgent,
+  providerInputError,
 } from "../provider-runtime.ts";
 import { jiraIssueEvents } from "./trigger-on-issue-event.ts";
 
@@ -639,7 +640,7 @@ export function normalizeJiraServerApiBaseUrl(
   }
   const url = assertPublicHttpUrl(instanceUrl, {
     fieldName: "baseUrl",
-    createError: (message) => new ProviderRequestError(400, message),
+    createError: providerInputError,
     allowPrivateNetwork,
   });
   if (url.username || url.password) {
@@ -1047,7 +1048,7 @@ function mapJiraResponseError(
   const message = readJiraErrorMessage(payload);
 
   if (status === 400) {
-    return new ProviderRequestError(400, message);
+    return providerInputError(message);
   }
   if (status === 401) {
     return new ProviderRequestError(phase === "auth" ? 400 : 401, message);
@@ -1059,7 +1060,7 @@ function mapJiraResponseError(
     return new ProviderRequestError(502, message, 403);
   }
   if (status === 404 && notFoundAsInvalidInput) {
-    return new ProviderRequestError(400, message);
+    return providerInputError(message);
   }
   if (status === 429) {
     return new ProviderRequestError(429, message);

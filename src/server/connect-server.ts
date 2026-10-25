@@ -2,6 +2,7 @@ import type { CatalogStore } from "../catalog-store.ts";
 import type { ConnectionService } from "../connection-service.ts";
 import type { ActionSearchIndexProvider } from "../core/action-search.ts";
 import type { ProviderHttpDispatchOptions } from "../core/provider-http-dispatch.ts";
+import type { ProviderNetworkPolicy } from "../core/provider-network-policy.ts";
 import type { RuntimeLogger, TransitFileUpload } from "../core/types.ts";
 import type { MarketplaceService } from "../marketplace/marketplace-service.ts";
 import type { OAuthClientConfigService } from "../oauth/oauth-client-config-service.ts";
@@ -24,7 +25,8 @@ import { compress } from "hono/compress";
 import { ActionPolicyService } from "../core/action-policy.ts";
 import { createActionSearchIndexProvider } from "../core/action-search.ts";
 import { optionalRecord } from "../core/cast.ts";
-import { withProviderHttpDispatch } from "../core/provider-http-dispatch.ts";
+import { ExecutionError } from "../core/execution-error.ts";
+import { withRuntimeExecution } from "../core/runtime-execution.ts";
 import { ProviderDispatchRequestError, toProviderExecutionError } from "../providers/provider-runtime.ts";
 import { SaasError } from "../saas/saas-client.ts";
 import { ActionRunner } from "./actions/action-runner.ts";
@@ -40,6 +42,7 @@ import { createMcpRoutes, loadMcpModule } from "./api/mcp-routes.ts";
 import { createPolicyRoutes } from "./api/policy-routes.ts";
 import { createPolicySnapshotProvider } from "./api/policy-snapshot.ts";
 import { createRunLogRoutes } from "./api/run-log-routes.ts";
+import { executionFailureStatus } from "./api/runtime-api.ts";
 import { writeRuntimeFailure, writeRuntimeSuccess } from "./api/runtime-api.ts";
 import { createRuntimeAppRoutes } from "./api/runtime-app-routes.ts";
 import { createRuntimeCatalogRoutes } from "./api/runtime-catalog-routes.ts";
@@ -64,6 +67,7 @@ export async function preloadOptionalServerModules(): Promise<void> {
  * Dependencies required to construct the local connector server.
  */
 export interface IConnectServerOptions {
+  network?: ProviderNetworkPolicy;
   providerHttpDispatch?: ProviderHttpDispatchOptions;
   catalog: CatalogStore;
   /** Public origin of this runtime, used for the HTTP request examples in Action guides. */
@@ -91,6 +95,8 @@ export interface IConnectServerOptions {
   serveDocumentation?: boolean;
   /** Seconds the OAuth completion page waits before closing its window. `0` closes it as soon as it loads. */
   oauthCloseDelaySeconds?: number;
+  /** Origins a provider-refusal page may post its result to (`OOMOL_CONNECT_OAUTH_RESULT_ORIGINS`). */
+  oauthResultOrigins?: readonly string[];
   marketplace?: MarketplaceService;
   saasProject?: SaasProjectService;
   saas?: SaasExecutionService;
@@ -113,6 +119,7 @@ export class ConnectServer {
     this.actionSearch = options.actionSearch ?? createActionSearchIndexProvider(options.catalog.actions);
     this.actionPolicy = options.actionPolicy ?? new ActionPolicyService();
     this.proxyRunner = new ProxyRunner({
+      network: options.network,
       providerHttpDispatch: options.providerHttpDispatch,
       catalog: options.catalog,
       providerLoader: options.providerLoader,
@@ -132,7 +139,7 @@ export class ConnectServer {
     const auth = this.options.auth ?? {};
 
     app.use("*", async (_context, next) => {
-      await withProviderHttpDispatch({ operation: "runtime" }, next, this.options.providerHttpDispatch);
+      await withRuntimeExecution(this.options, { operation: "runtime" }, next);
     });
 
     app.use("*", async (context, next) => {
@@ -199,6 +206,7 @@ export class ConnectServer {
         rawBody,
         configuredAppId: appId,
         signingSecret,
+        contentType: context.req.header("content-type") ?? "",
       });
       if (!result.valid) {
         switch (result.reason) {
@@ -294,7 +302,7 @@ export class ConnectServer {
     app.route(
       "/",
       createDocsRoutes({
-        providers: this.options.catalog.providers,
+        catalog: this.options.catalog,
         publicOrigin: this.options.publicOrigin,
         serveDocumentation: this.options.serveDocumentation,
       }),
@@ -354,6 +362,7 @@ export class ConnectServer {
         saasProject: this.options.saasProject,
         logger: this.options.logger,
         oauthCloseDelaySeconds: this.options.oauthCloseDelaySeconds,
+        oauthResultOrigins: this.options.oauthResultOrigins,
       }),
     );
 
@@ -403,15 +412,16 @@ export class ConnectServer {
           error.status,
         );
       }
-      if (error instanceof HttpRequestError) {
+      if (error instanceof HttpRequestError || error instanceof ExecutionError) {
+        const status = error instanceof ExecutionError ? executionFailureStatus(error.kind) : error.status;
         if (context.req.path.startsWith("/v1/")) {
           return writeRuntimeFailure(context, {
-            status: error.status,
+            status,
             errorCode: error.code,
             message: error.message,
           });
         }
-        return jsonError(context, error.status, error.code, error.message);
+        return jsonError(context, status, error.code, error.message);
       }
       this.options.logger?.error(
         {

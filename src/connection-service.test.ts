@@ -1,4 +1,4 @@
-import type { IConnectionStore, StoredConnection } from "./connection-service.ts";
+import type { IConnectionStore, StoredConnection } from "./connection-store.ts";
 import type { ProviderHttpAttempt, ProviderHttpDispatchOptions } from "./core/provider-http-dispatch.ts";
 import type { ActionExecutor, CredentialValidators, ProviderDefinition, ResolvedCredential } from "./core/types.ts";
 import type { MarketplaceService } from "./marketplace/marketplace-service.ts";
@@ -8,7 +8,8 @@ import type { IProviderLoader } from "./providers/provider-loader.ts";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCatalogStore } from "./catalog-store.ts";
-import { ConnectionError, ConnectionService } from "./connection-service.ts";
+import { ConnectionError } from "./connection-error.ts";
+import { ConnectionService } from "./connection-service.ts";
 import { OAuthClientConfigService } from "./oauth/oauth-client-config-service.ts";
 import { OAuthCredentialRefreshService } from "./oauth/oauth-credential-refresh-service.ts";
 
@@ -637,7 +638,7 @@ describe("ConnectionService", () => {
     expect(await service.getConnectionSummary("example", "work")).toEqual(expected);
     expect(await service.listConnections()).toEqual([expected]);
     expect(await service.listConnectionsByService("example")).toEqual([expected]);
-    expect((await service.resolveForExecution("example", "work")).summary).toEqual(expected);
+    expect((await service.resolveConnection("example", "work")).summary).toEqual(expected);
   });
 
   // Absent, not null or empty: a connection made before this existed has no
@@ -937,7 +938,7 @@ describe("ConnectionService", () => {
       "fetch",
       vi.fn(async () => Response.json({ access_token: "fresh-token", expires_in: 3600, token_type: "Bearer" })),
     );
-    const target = await service.resolveForExecution("example", undefined, original.id);
+    const target = await service.resolveConnection("example", undefined, original.id);
     expect(attempts).toHaveLength(1);
     expect(attempts[0]?.context).toMatchObject({
       operation: "oauth",
@@ -945,8 +946,8 @@ describe("ConnectionService", () => {
       connectionId: original.id,
       connectionName: "binding-fixture",
     });
-    if (target.kind !== "local") throw new Error("Expected local connection");
-    await expect(target.getCredential("example")).resolves.toMatchObject({ accessToken: "fresh-token" });
+    if (target.source !== "local") throw new Error("Expected local connection");
+    expect(target.credential).toMatchObject({ accessToken: "fresh-token" });
     expect(JSON.stringify(attempts)).not.toMatch(/expired-token|refresh-token|client-secret/);
   });
 
@@ -982,9 +983,9 @@ describe("ConnectionService", () => {
       oauthCredentials: { refresh },
       providerHttpDispatch: { beforeAttempt: () => ({ allow: true }) },
     });
-    const target = await guarded.resolveForExecution("example");
-    if (target.kind !== "local") throw new Error("Expected local connection");
-    await expect(target.getCredential("example")).resolves.toMatchObject({ accessToken: "fresh-token" });
+    const target = await guarded.resolveConnection("example");
+    if (target.source !== "local") throw new Error("Expected local connection");
+    expect(target.credential).toMatchObject({ accessToken: "fresh-token" });
     expect(refresh).toHaveBeenCalledTimes(2);
   });
 
@@ -1025,7 +1026,7 @@ describe("ConnectionService", () => {
       }),
     );
 
-    const execution = service.resolveForExecution("example");
+    const execution = service.resolveConnection("example");
     await refreshStarted;
     await store.delete("example", "default");
     const recreated = await store.set("example", "default", {
@@ -1100,7 +1101,7 @@ describe("ConnectionService", () => {
       }),
     );
 
-    const originalExecution = service.resolveForExecution("example");
+    const originalExecution = service.resolveConnection("example");
     await originalRefreshStarted;
     const replaced = await store.set("example", "default", {
       authType: "oauth2",
@@ -1111,7 +1112,7 @@ describe("ConnectionService", () => {
       profile: testProfile,
       metadata: {},
     });
-    const replacementExecution = service.resolveForExecution("example");
+    const replacementExecution = service.resolveConnection("example");
     await replacementRefreshStarted;
     expect(fetch).toHaveBeenCalledTimes(2);
     completeRefreshes[1]!(
@@ -1122,8 +1123,8 @@ describe("ConnectionService", () => {
       }),
     );
     const current = await replacementExecution;
-    if (current.kind !== "local") throw new Error("Expected local connection");
-    await expect(current.getCredential("example")).resolves.toMatchObject({
+    if (current.source !== "local") throw new Error("Expected local connection");
+    expect(current.credential).toMatchObject({
       accessToken: "replacement-refreshed-token",
     });
     completeRefreshes[0]!(
@@ -1486,7 +1487,7 @@ describe("ConnectionService", () => {
       metadata: {},
     });
 
-    const resolved = await service.resolveForExecution("uptimerobot");
+    const resolved = await service.resolveConnection("uptimerobot");
     const updated = await store.set("uptimerobot", "default", {
       authType: "api_key",
       apiKey: "replacement-key",
@@ -1497,8 +1498,8 @@ describe("ConnectionService", () => {
 
     expect(updated.id).toBe(original.id);
     expect(resolved.summary?.id).toBe(original.id);
-    if (resolved.kind !== "local") throw new Error("Expected local connection");
-    await expect(resolved.getCredential("uptimerobot")).resolves.toMatchObject({
+    if (resolved.source !== "local") throw new Error("Expected local connection");
+    expect(resolved.credential).toMatchObject({
       apiKey: "original-key",
       profile: { accountId: "example-account" },
     });
@@ -1517,11 +1518,11 @@ describe("ConnectionService", () => {
     const target = await createService([apiKeyProvider], {
       store,
       providerHttpDispatch: { beforeAttempt: () => ({ allow: true }) },
-    }).resolveForExecution("uptimerobot");
-    if (target.kind !== "local") throw new Error("Expected local connection");
-    expect(await target.getCredential("uptimerobot")).toBe(credential);
+    }).resolveConnection("uptimerobot");
+    if (target.source !== "local") throw new Error("Expected local connection");
+    expect(target.credential).toBe(credential);
     credential.apiKey = "updated-key";
-    await expect(target.getCredential("uptimerobot")).resolves.toMatchObject({ apiKey: "updated-key" });
+    expect(target.credential).toMatchObject({ apiKey: "updated-key" });
   });
 
   it("resolves each service credential once per forConnection scope", async () => {
@@ -1971,7 +1972,7 @@ it("keeps SaaS references out of the local credential and refresh paths", async 
   vi.spyOn(store, "get").mockResolvedValue(remote);
   vi.spyOn(store, "list").mockResolvedValue([remote]);
   const service = createService([oauthProvider], { store });
-  expect(await service.resolveForExecution("example")).toMatchObject({ kind: "saas", reference: remote.reference });
+  expect(await service.resolveConnection("example")).toMatchObject({ source: "saas", reference: remote.reference });
   expect(await service.getConnectionSummary("example")).toMatchObject({ profile: testProfile, configured: true });
   expect(await service.listAuthenticatedServices(["example"])).toContain("example");
   await expect(service.getCredential("example")).rejects.toMatchObject({ code: "unsupported_auth_type" });
